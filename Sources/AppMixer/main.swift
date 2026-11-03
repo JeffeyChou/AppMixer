@@ -62,9 +62,41 @@ func snapshotPanel(to path: String, showIdle: Bool, demo: Bool) {
     app.setActivationPolicy(.prohibited)
     let model = MixerModel(engineEnabled: false)   // UI-only: nothing below is saved or applied
     model.showAll = showIdle
+    var demoRenderer: TapRenderer?
+    defer { _ = demoRenderer }
     if demo, let first = (model.playingApps + model.idleApps).first {
         model.setEQ(EQ.presets[1].gains, for: first.id)
         model.toggleEQExpanded(first.id)
+        // Synthetic "music" (pink-ish partials + a bass note and a vocal formant) through the demo EQ,
+        // so the preview shows a spectrum drawn by the real render → ring → analyser path.
+        let rate = 48_000.0
+        let renderer = TapRenderer(gain: 1, tapChannels: 2, sampleRate: rate)
+        renderer.eq.update(EQ.coefficients(gains: EQ.presets[1].gains, sampleRate: rate))
+        var partials: [(f: Double, a: Double, p: Double)] = (0..<48).map { i in
+            let f = 30 * pow(500, Double(i) / 47)
+            return (f, 0.02 / sqrt(f / 30), Double(i) * 1.7)
+        }
+        partials += [(55, 0.12, 0), (110, 0.06, 1), (820, 0.05, 2), (1250, 0.04, 3), (2900, 0.02, 4)]
+        let frames = 512
+        let input = UnsafeMutablePointer<Float>.allocate(capacity: frames * 2)
+        let output = UnsafeMutablePointer<Float>.allocate(capacity: frames * 2)
+        let inList = AudioBufferList.allocate(maximumBuffers: 1), outList = AudioBufferList.allocate(maximumBuffers: 1)
+        inList[0] = AudioBuffer(mNumberChannels: 2, mDataByteSize: UInt32(frames * 8), mData: input)
+        outList[0] = AudioBuffer(mNumberChannels: 2, mDataByteSize: UInt32(frames * 8), mData: output)
+        var n = 0
+        for _ in 0..<40 {
+            for i in 0..<frames {
+                let t = Double(n + i) / rate
+                let v = Float(partials.reduce(0) { $0 + $1.a * sin(2 * .pi * $1.f * t + $1.p) })
+                input[2 * i] = v
+                input[2 * i + 1] = v
+            }
+            n += frames
+            renderer.render(input: inList.unsafePointer, output: outList.unsafeMutablePointer)
+        }
+        model.demoRing = renderer.ring
+        model.spectrumAnalyzer(for: first.id).update(from: renderer.ring, smoothing: false)
+        demoRenderer = renderer
         if let other = model.devices.first(where: { $0.uid != model.systemDeviceUID }) {
             model.setOutput(other.uid, for: first.id)
         }

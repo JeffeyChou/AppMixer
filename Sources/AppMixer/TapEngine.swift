@@ -31,6 +31,22 @@ final class TapEngine {
     private var pendingRetryAll = false
     private var drainScheduled = false
 
+    // Spectrum feeds of live taps, readable from the UI thread.
+    private let ringLock = NSLock()
+    private var rings: [String: AnalysisRing] = [:]
+
+    func analysisRing(for id: String) -> AnalysisRing? {
+        ringLock.lock()
+        defer { ringLock.unlock() }
+        return rings[id]
+    }
+
+    private func publishRing(_ ring: AnalysisRing?, for id: String) {
+        ringLock.lock()
+        rings[id] = ring
+        ringLock.unlock()
+    }
+
     // Engine-queue state.
     private var targets: [String: Target] = [:]
     private var taps: [String: ProcessTap] = [:]
@@ -58,6 +74,9 @@ final class TapEngine {
             taps.values.forEach { $0.invalidate() }
             taps.removeAll()
         }
+        ringLock.lock()
+        rings.removeAll()
+        ringLock.unlock()
     }
 
     private func drain() {
@@ -118,8 +137,10 @@ final class TapEngine {
 
             remove(id)
             do {
-                taps[id] = try ProcessTap(name: target.name, processObjectIDs: target.objectIDs,
-                                          outputUIDs: target.outputUIDs, gain: target.gain, eq: target.eq)
+                let tap = try ProcessTap(name: target.name, processObjectIDs: target.objectIDs,
+                                         outputUIDs: target.outputUIDs, gain: target.gain, eq: target.eq)
+                taps[id] = tap
+                publishRing(tap.analysis, for: id)
                 report(id, nil)
             } catch {
                 failedSignature[id] = signature
@@ -130,6 +151,7 @@ final class TapEngine {
     }
 
     private func remove(_ id: String) {
+        if taps[id] != nil { publishRing(nil, for: id) }
         taps.removeValue(forKey: id)?.invalidate()
         idleSince[id] = nil
     }

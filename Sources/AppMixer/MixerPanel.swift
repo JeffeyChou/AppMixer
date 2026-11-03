@@ -384,13 +384,73 @@ private struct EQEditor: View, Equatable {
                     .controlSize(.mini)
                     .font(.caption)
             }
-            EQGraph(gains: gains, isOn: isOn) { band, gain in
-                model.setEQBand(band, gain: gain, for: id)
+            ZStack {
+                SpectrumView(id: id, model: model).equatable()
+                EQGraph(gains: gains, isOn: isOn) { band, gain in
+                    model.setEQBand(band, gain: gain, for: id)
+                }
             }
-            .frame(height: 104)
+            .frame(height: 112)
         }
         .padding(8)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.05)))
+    }
+}
+
+/// Shared geometry of the EQ graph and the spectrum behind it: log-frequency x axis (32 Hz–16 kHz),
+/// ±12 dB for the EQ curve, -90…-6 dBFS for the spectrum.
+private enum EQPlot {
+    static let inset = EdgeInsets(top: 6, leading: 12, bottom: 16, trailing: 12)
+    static let span = log2(EQ.frequencies.last! / EQ.frequencies.first!)
+    static let spectrumRange: ClosedRange<Float> = -90 ... -6
+
+    static func x(_ frequency: Double, _ size: CGSize) -> CGFloat {
+        let t = log2(frequency / EQ.frequencies.first!) / span
+        return inset.leading + CGFloat(t) * (size.width - inset.leading - inset.trailing)
+    }
+
+    static func y(_ db: Double, _ size: CGSize) -> CGFloat {
+        let h = size.height - inset.top - inset.bottom
+        return inset.top + h * CGFloat(1 - (min(max(db, -EQ.maxGain), EQ.maxGain) + EQ.maxGain) / (2 * EQ.maxGain))
+    }
+
+    static func spectrumY(_ dbfs: Float, _ size: CGSize) -> CGFloat {
+        let h = size.height - inset.top - inset.bottom
+        let lo = spectrumRange.lowerBound, hi = spectrumRange.upperBound
+        let t = (min(max(dbfs, lo), hi) - lo) / (hi - lo)
+        return inset.top + h * CGFloat(1 - t)
+    }
+}
+
+/// Live spectrum of the app's audio after the EQ (before the volume slider), drawn behind the curve.
+/// Only this Canvas redraws (~30 fps); the analysis runs only while an EQ editor is open.
+private struct SpectrumView: View, Equatable {
+    let id: String
+    let model: MixerModel
+
+    static func == (a: SpectrumView, b: SpectrumView) -> Bool { a.id == b.id }
+
+    var body: some View {
+        let analyzer = model.spectrumAnalyzer(for: id)
+        TimelineView(.periodic(from: .now, by: 1.0 / 30)) { timeline in
+            Canvas { ctx, size in
+                _ = timeline.date   // redraw on every tick
+                analyzer.update(from: model.analysisRing(id))
+                let bottom = size.height - EQPlot.inset.bottom
+                var area = Path()
+                area.move(to: CGPoint(x: EQPlot.x(analyzer.centers[0], size), y: bottom))
+                for (i, f) in analyzer.centers.enumerated() {
+                    area.addLine(to: CGPoint(x: EQPlot.x(f, size), y: EQPlot.spectrumY(analyzer.levels[i], size)))
+                }
+                area.addLine(to: CGPoint(x: EQPlot.x(analyzer.centers.last!, size), y: bottom))
+                area.closeSubpath()
+                ctx.fill(area, with: .linearGradient(
+                    Gradient(colors: [Color.primary.opacity(0.26), Color.primary.opacity(0.04)]),
+                    startPoint: CGPoint(x: 0, y: EQPlot.inset.top), endPoint: CGPoint(x: 0, y: bottom)))
+            }
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 }
 
@@ -402,18 +462,10 @@ private struct EQGraph: View {
     let onChange: (Int, Double) -> Void
     @State private var dragBand: Int?
 
-    private let inset = EdgeInsets(top: 6, leading: 12, bottom: 16, trailing: 12)
-    private static let span = log2(EQ.frequencies.last! / EQ.frequencies.first!)
-
-    private func x(_ frequency: Double, _ size: CGSize) -> CGFloat {
-        let t = log2(frequency / EQ.frequencies.first!) / Self.span
-        return inset.leading + CGFloat(t) * (size.width - inset.leading - inset.trailing)
-    }
-
-    private func y(_ db: Double, _ size: CGSize) -> CGFloat {
-        let h = size.height - inset.top - inset.bottom
-        return inset.top + h * CGFloat(1 - (min(max(db, -EQ.maxGain), EQ.maxGain) + EQ.maxGain) / (2 * EQ.maxGain))
-    }
+    private let inset = EQPlot.inset
+    private static let span = EQPlot.span
+    private func x(_ frequency: Double, _ size: CGSize) -> CGFloat { EQPlot.x(frequency, size) }
+    private func y(_ db: Double, _ size: CGSize) -> CGFloat { EQPlot.y(db, size) }
 
     var body: some View {
         GeometryReader { geo in
@@ -469,7 +521,7 @@ private struct EQGraph: View {
                     .onEnded { _ in dragBand = nil }
             )
         }
-        .help("Drag a band up or down. Presets reset the curve.")
+        .help("Drag a band up or down. The shaded area is the app's live spectrum after the EQ.")
     }
 }
 

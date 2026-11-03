@@ -41,19 +41,57 @@ enum SelfTest {
             check("mono downmix", r.maxError < 1e-6, String(format: "max error = %.2e", r.maxError))
         }
 
-        // 5. Cost of one 512-frame stereo buffer with a 10-band EQ (budget at 48 kHz: 10 667 µs).
+        // 5. Spectrum analyser: a -6 dBFS sine reads ≈ -6 dB in its band and is far lower an octave away.
+        for f in [40.0, 1000, 8000] {
+            let analyzer = SpectrumAnalyzer()
+            analyzer.update(from: sineRing(frequency: f, amplitude: 0.5), smoothing: false)
+            let band = analyzer.centers.indices.min { abs(log2(analyzer.centers[$0] / f)) < abs(log2(analyzer.centers[$1] / f)) }!
+            let level = analyzer.levels[band]
+            let octaveAway = [band - 6, band + 6].filter { analyzer.levels.indices.contains($0) }.map { analyzer.levels[$0] }.max() ?? -200
+            check("spectrum @ \(Int(f)) Hz", abs(level + 6) < 1.5 && octaveAway < -50,
+                  String(format: "band %.0f Hz reads %.1f dBFS (expected -6.0), one octave away %.1f dBFS",
+                         analyzer.centers[band], level, octaveAway))
+        }
+
+        // 6. Cost of one 512-frame stereo buffer with a 10-band EQ (budget at 48 kHz: 10 667 µs).
         let iterations = 20_000
         let t = timeRender(eq: vocal, iterations: iterations)
         print(String(format: "TIME  render 512 frames stereo + 10-band EQ: %.2f µs/buffer = %.3f%% of one core in real time",
                      t, t / (Double(frames) / rate * 1e6) * 100))
+
+        // 7. Cost of one spectrum frame (8192-point FFT + 55 bands); the UI does ~30 per second.
+        let ring = sineRing(frequency: 440, amplitude: 0.3)
+        let analyzer = SpectrumAnalyzer()
+        var one: Float = 0
+        let t0 = DispatchTime.now().uptimeNanoseconds
+        for _ in 0..<500 {
+            ring.append(planar: &one, channels: 1, stride: 1, frames: 1)   // new data → full recompute
+            analyzer.update(from: ring)
+        }
+        let us = Double(DispatchTime.now().uptimeNanoseconds - t0) / 500 / 1000
+        print(String(format: "TIME  spectrum frame: %.1f µs → %.2f%% of the main thread at 30 fps", us, us * 30 / 1e4))
         return ok
     }
 
     private struct Result { let gainDB: Double; let maxError: Float }
 
+    private static func sineRing(frequency: Double, amplitude: Double) -> AnalysisRing {
+        let ring = AnalysisRing(sampleRate: rate)
+        var block = [Float](repeating: 0, count: 1024)
+        var phase = 0.0
+        for _ in 0..<(AnalysisRing.capacity / block.count) {
+            for i in block.indices {
+                block[i] = Float(amplitude * sin(phase))
+                phase += 2 * .pi * frequency / rate
+            }
+            ring.append(planar: block, channels: 1, stride: block.count, frames: block.count)
+        }
+        return ring
+    }
+
     /// Feeds `blocks` buffers of a sine through a renderer; compares the last block with the input.
     private static func run(frequency: Double, gain: Float, eq: [Double]?, blocks: Int, outChannels: Int = 2) -> Result {
-        let renderer = TapRenderer(gain: gain, tapChannels: 2)
+        let renderer = TapRenderer(gain: gain, tapChannels: 2, sampleRate: rate)
         renderer.eq.update(eq.map { EQ.coefficients(gains: $0, sampleRate: rate) })
         let input = Buffers(channels: 2, frames: frames)
         let output = Buffers(channels: outChannels, frames: frames)
@@ -85,7 +123,7 @@ enum SelfTest {
     }
 
     private static func timeRender(eq: [Double], iterations: Int) -> Double {
-        let renderer = TapRenderer(gain: 0.8, tapChannels: 2)
+        let renderer = TapRenderer(gain: 0.8, tapChannels: 2, sampleRate: rate)
         renderer.eq.update(EQ.coefficients(gains: eq, sampleRate: rate))
         let input = Buffers(channels: 2, frames: frames)
         let output = Buffers(channels: 2, frames: frames)

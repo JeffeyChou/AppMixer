@@ -18,7 +18,15 @@ final class MixerModel: ObservableObject {
     @Published private(set) var eqGains: [String: [Double]]
     @Published private(set) var eqOff: Set<String>          // curve kept, but bypassed
     @Published private(set) var appOutputs: [String: String] // app id → device UID (absent = system output)
-    @Published var expandedEQ: String?
+    /// The app whose EQ editor is open. While the panel is visible that app is tapped (even at 100 % with
+    /// EQ off) so its spectrum can be shown.
+    @Published var expandedEQ: String? {
+        didSet {
+            guard expandedEQ != oldValue else { return }
+            analyzers = analyzers.filter { $0.key == expandedEQ }
+            pushTargets()
+        }
+    }
     @Published var showAll: Bool { didSet { if engineEnabled { defaults.set(showAll, forKey: Keys.showAll) } } }
 
     // System output
@@ -59,6 +67,10 @@ final class MixerModel: ObservableObject {
     private var lastLocalVolumeChange = Date.distantPast
     private var requestingPermission = false
     private var pollTimer: Timer?
+    private var panelVisible = false
+    private var analyzers: [String: SpectrumAnalyzer] = [:]
+    /// `--snapshot --demo` only: a ring filled with synthetic audio so the spectrum can be previewed.
+    var demoRing: AnalysisRing?
     private var saveWork: DispatchWorkItem?
     /// false = UI-only model (`--snapshot`, benchmarks): never creates taps, changes devices, asks for
     /// permission or writes settings.
@@ -171,6 +183,21 @@ final class MixerModel: ObservableObject {
         return d
     }
 
+    // MARK: - Spectrum
+
+    /// Post-EQ audio of an app's tap, if it is currently tapped.
+    func analysisRing(_ id: String) -> AnalysisRing? {
+        demoRing ?? engine.analysisRing(for: id)
+    }
+
+    /// One analyser, kept only for the open EQ editor.
+    func spectrumAnalyzer(for id: String) -> SpectrumAnalyzer {
+        if let a = analyzers[id] { return a }
+        let a = SpectrumAnalyzer()
+        analyzers[id] = a
+        return a
+    }
+
     // MARK: - Per-app actions
 
     func setVolume(_ value: Double, for id: String) {
@@ -259,6 +286,10 @@ final class MixerModel: ObservableObject {
     func setPanelVisible(_ visible: Bool) {
         pollTimer?.invalidate()
         pollTimer = nil
+        if panelVisible != visible {
+            panelVisible = visible
+            if expandedEQ != nil { pushTargets() }
+        }
         guard visible, engineEnabled else { return }
         let timer = Timer(timeInterval: 2.0, repeats: true) { [weak self] _ in self?.refresh() }
         timer.tolerance = 0.5
@@ -591,7 +622,8 @@ final class MixerModel: ObservableObject {
             } else if needsFollow(app) {
                 routed = true   // outputs stay = system output
             }
-            let needs = abs(g - 1) > 0.0001 || eq != nil || routed
+            let analyzing = panelVisible && expandedEQ == app.id
+            let needs = abs(g - 1) > 0.0001 || eq != nil || routed || analyzing
             wantsTap = wantsTap || needs
             targets[app.id] = TapEngine.Target(name: app.name, objectIDs: app.objectIDs, gain: g, eq: eq,
                                                outputUIDs: outputs, needsTap: needs)

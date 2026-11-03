@@ -84,7 +84,7 @@ final class ProcessTap {
         tapID = tap
         aggregateID = aggregate
         sampleRate = rate
-        renderer = TapRenderer(gain: gain, tapChannels: channels)
+        renderer = TapRenderer(gain: gain, tapChannels: channels, sampleRate: rate)
         setEQ(eq)
 
         let renderer = self.renderer
@@ -109,6 +109,9 @@ final class ProcessTap {
     func setGain(_ gain: Float) {
         renderer.target.pointee = gain
     }
+
+    /// Latest post-EQ samples, for the spectrum view.
+    var analysis: AnalysisRing { renderer.ring }
 
     /// nil or all-zero = EQ off.
     func setEQ(_ gains: [Double]?) {
@@ -140,12 +143,14 @@ final class TapRenderer {
     /// Written by the engine queue, read by the IO thread (an aligned Float store is atomic on arm64/x86_64).
     let target: UnsafeMutablePointer<Float>
     let eq = EQProcessor()
+    let ring: AnalysisRing
     private var current: Float
     private let tapChannels: Int
     private let capacity = 16_384                       // frames per channel in the scratch buffer
     private let scratch: UnsafeMutablePointer<Float>   // planar: tapChannels × capacity
 
-    init(gain: Float, tapChannels: Int) {
+    init(gain: Float, tapChannels: Int, sampleRate: Double) {
+        ring = AnalysisRing(sampleRate: sampleRate)
         target = .allocate(capacity: 1)
         target.initialize(to: gain)
         current = gain
@@ -188,8 +193,9 @@ final class TapRenderer {
             }
         }
 
-        // 2. EQ in place.
+        // 2. EQ in place, then hand the (post-EQ, pre-volume) signal to the spectrum view.
         eq.process(scratch, channels: tapChannels, capacity: capacity, frames: frames)
+        ring.append(planar: scratch, channels: tapChannels, stride: capacity, frames: frames)
 
         // 3. Gain ramp (g0 → g1, avoids zipper noise) + clamp into every output buffer.
         var totalOut = 0
