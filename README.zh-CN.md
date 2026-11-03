@@ -120,3 +120,13 @@ $APP --icon-preview        # 在菜单栏临时显示图标 3 秒
 | `OutputDevices.swift` | 设备、系统音量、Share Audio |
 | `MixerModel.swift` | 状态与路由规则 |
 | `MixerPanel.swift` | 界面 |
+
+## 许可证
+
+AppMixer 采用 [CC BY-NC-SA 4.0](LICENSE) 许可证。
+
+- **个人等非商业用途免费**，可以使用、修改和 fork。
+- **fork 和修改后的版本**需要注明原项目，并使用同样的许可证。
+- **商业用途需要另外获得授权**，包括出售 AppMixer 或其修改版、捆绑进付费产品或服务、在企业内部用于商业目的等。如有需要请联系作者。
+
+由于限制了商业用途，AppMixer 属于源码公开（source-available），而不是 OSI 定义的「开源软件」。

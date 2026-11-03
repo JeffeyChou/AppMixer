@@ -120,3 +120,13 @@ $APP --icon-preview        # show the menu bar icon for 3 s
 | `OutputDevices.swift` | Devices, system volume, Share Audio |
 | `MixerModel.swift` | State and routing rules |
 | `MixerPanel.swift` | UI |
+
+## License
+
+AppMixer is licensed under [CC BY-NC-SA 4.0](LICENSE).
+
+- **Personal and other non-commercial use is free.** You can use, modify and fork it.
+- **Forks and modified versions** must credit the original project and use the same license.
+- **Commercial use requires a separate license.** This includes selling AppMixer or a modified version, bundling it with a paid product or service, and using it inside a business for commercial advantage. Please contact the author.
+
+Because commercial use is restricted, AppMixer is source-available rather than "open source" in the OSI sense.
