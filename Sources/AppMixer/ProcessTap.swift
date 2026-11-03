@@ -1,27 +1,33 @@
 import CoreAudio
 import Foundation
 
-/// Per-app volume via a Core Audio process tap:
+/// Per-app processing via a Core Audio process tap:
 ///
 ///   app audio ──▶ process tap (app muted at the hardware while we read it)
 ///                     │
 ///                     ▼
-///   private aggregate device [ tap as input  +  current output device as output ]
-///                     │  IOProc: out = clamp(in × gain)
+///   private aggregate device [ tap as input  +  output device(s) ]
+///                     │  IOProc: EQ → × gain → clamp
 ///                     ▼
-///                 speakers / headphones
+///      chosen output (system output, a specific device, or several devices when sharing)
 ///
 /// Everything is private to this process, so if AppMixer quits or crashes the tap disappears
-/// and the app plays at its normal volume again.
+/// and the app plays normally again.
 final class ProcessTap {
     let signature: String
     private let renderer: TapRenderer
+    private let sampleRate: Double
+    private var appliedEQ: [Double]?
     private var tapID = CA.unknown
     private var aggregateID = CA.unknown
     private var procID: AudioDeviceIOProcID?
 
-    init(name: String, processObjectIDs: [AudioObjectID], outputDevice: AudioDeviceID, gain: Float) throws {
-        signature = ProcessTap.signature(objectIDs: processObjectIDs, outputDevice: outputDevice)
+    /// `outputUIDs`: one device, or several to play on all of them (stacked aggregate, first = clock).
+    init(name: String, processObjectIDs: [AudioObjectID], outputUIDs: [String], gain: Float, eq: [Double]?) throws {
+        signature = ProcessTap.signature(objectIDs: processObjectIDs, outputUIDs: outputUIDs)
+        guard let mainUID = outputUIDs.first else {
+            throw CoreAudioError(status: kAudioHardwareBadDeviceError, what: "no output device")
+        }
 
         var tap = CA.unknown
         var aggregate = CA.unknown
@@ -31,6 +37,7 @@ final class ProcessTap {
         }
 
         let channels: Int
+        let rate: Double
         do {
             let description = CATapDescription(stereoMixdownOfProcesses: processObjectIDs)
             description.uuid = UUID()
@@ -47,15 +54,18 @@ final class ProcessTap {
             }
             channels = Int(format.mChannelsPerFrame)
 
-            let outputUID = try CA.deviceUID(outputDevice)
+            var subdevices: [[String: Any]] = [[kAudioSubDeviceUIDKey: mainUID]]
+            for uid in outputUIDs.dropFirst() {
+                subdevices.append([kAudioSubDeviceUIDKey: uid, kAudioSubDeviceDriftCompensationKey: true])
+            }
             let aggregateDescription: [String: Any] = [
                 kAudioAggregateDeviceNameKey: "AppMixer – \(name)",
                 kAudioAggregateDeviceUIDKey: "AppMixer.aggregate.\(UUID().uuidString)",
-                kAudioAggregateDeviceMainSubDeviceKey: outputUID,
+                kAudioAggregateDeviceMainSubDeviceKey: mainUID,
                 kAudioAggregateDeviceIsPrivateKey: true,
-                kAudioAggregateDeviceIsStackedKey: false,
+                kAudioAggregateDeviceIsStackedKey: outputUIDs.count > 1,
                 kAudioAggregateDeviceTapAutoStartKey: true,
-                kAudioAggregateDeviceSubDeviceListKey: [[kAudioSubDeviceUIDKey: outputUID]],
+                kAudioAggregateDeviceSubDeviceListKey: subdevices,
                 kAudioAggregateDeviceTapListKey: [[
                     kAudioSubTapUIDKey: description.uuid.uuidString,
                     kAudioSubTapDriftCompensationKey: true,
@@ -63,6 +73,9 @@ final class ProcessTap {
             ]
             try check(AudioHardwareCreateAggregateDevice(aggregateDescription as CFDictionary, &aggregate),
                       "AudioHardwareCreateAggregateDevice")
+
+            let nominal = (try? CA.get(aggregate, kAudioDevicePropertyNominalSampleRate, initial: Float64(0))) ?? 0
+            rate = nominal > 0 ? nominal : (format.mSampleRate > 0 ? format.mSampleRate : 48_000)
         } catch {
             cleanUp()
             throw error
@@ -70,7 +83,9 @@ final class ProcessTap {
 
         tapID = tap
         aggregateID = aggregate
+        sampleRate = rate
         renderer = TapRenderer(gain: gain, tapChannels: channels)
+        setEQ(eq)
 
         let renderer = self.renderer
         var proc: AudioDeviceIOProcID?
@@ -87,12 +102,20 @@ final class ProcessTap {
         }
     }
 
-    static func signature(objectIDs: [AudioObjectID], outputDevice: AudioDeviceID) -> String {
-        "\(outputDevice)|" + objectIDs.sorted().map(String.init).joined(separator: ",")
+    static func signature(objectIDs: [AudioObjectID], outputUIDs: [String]) -> String {
+        outputUIDs.joined(separator: "+") + "|" + objectIDs.sorted().map(String.init).joined(separator: ",")
     }
 
     func setGain(_ gain: Float) {
         renderer.target.pointee = gain
+    }
+
+    /// nil or all-zero = EQ off.
+    func setEQ(_ gains: [Double]?) {
+        let effective = gains.flatMap { EQ.isFlat($0) ? nil : $0 }
+        guard effective != appliedEQ else { return }
+        appliedEQ = effective
+        renderer.eq.update(effective.map { EQ.coefficients(gains: $0, sampleRate: sampleRate) })
     }
 
     func invalidate() {
@@ -112,21 +135,29 @@ final class ProcessTap {
     deinit { invalidate() }
 }
 
-/// Real-time render state. No allocation or locking in `render`.
+/// Real-time render state. No allocation or blocking in `render`.
 final class TapRenderer {
-    /// Written by the main thread, read by the IO thread (an aligned Float store is atomic on arm64/x86_64).
+    /// Written by the engine queue, read by the IO thread (an aligned Float store is atomic on arm64/x86_64).
     let target: UnsafeMutablePointer<Float>
+    let eq = EQProcessor()
     private var current: Float
     private let tapChannels: Int
+    private let capacity = 16_384                       // frames per channel in the scratch buffer
+    private let scratch: UnsafeMutablePointer<Float>   // planar: tapChannels × capacity
 
     init(gain: Float, tapChannels: Int) {
         target = .allocate(capacity: 1)
         target.initialize(to: gain)
         current = gain
         self.tapChannels = tapChannels
+        scratch = .allocate(capacity: tapChannels * capacity)
+        scratch.initialize(repeating: 0, count: tapChannels * capacity)
     }
 
-    deinit { target.deallocate() }
+    deinit {
+        target.deallocate()
+        scratch.deallocate()
+    }
 
     func render(input: UnsafePointer<AudioBufferList>, output: UnsafeMutablePointer<AudioBufferList>) {
         let inList = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: input))
@@ -136,18 +167,34 @@ final class TapRenderer {
         let g1 = target.pointee
         current = g1
 
-        // Tap streams come after any input streams of the output device, so they are the
-        // trailing buffers of the input list.
+        // 1. Gather the tap's channels (the trailing input buffers) into planar scratch buffers.
         var remaining = tapChannels
         var firstTapBuffer = inList.count
         while firstTapBuffer > 0 && remaining > 0 {
             firstTapBuffer -= 1
             remaining -= Int(inList[firstTapBuffer].mNumberChannels)
         }
-        let tapFound = remaining == 0
+        var frames = remaining == 0 ? capacity : 0
+        if frames > 0 {
+            for tc in 0..<tapChannels {
+                guard let (src, stride, n) = channel(inList, firstTapBuffer, tc) else { frames = 0; break }
+                frames = min(frames, n)
+                let dst = scratch + tc * capacity
+                var i = 0
+                while i < frames {
+                    dst[i] = src[i * stride]
+                    i += 1
+                }
+            }
+        }
 
+        // 2. EQ in place.
+        eq.process(scratch, channels: tapChannels, capacity: capacity, frames: frames)
+
+        // 3. Gain ramp (g0 → g1, avoids zipper noise) + clamp into every output buffer.
         var totalOut = 0
         for b in outList { totalOut += Int(b.mNumberChannels) }
+        let step = frames > 0 ? (g1 - g0) / Float(frames) : 0
 
         var base = 0
         for ob in 0..<outList.count {
@@ -156,62 +203,56 @@ final class TapRenderer {
             defer { base += nch }
             guard nch > 0, let raw = buf.mData else { continue }
             memset(raw, 0, Int(buf.mDataByteSize))
-            guard tapFound else { continue }
-
             let out = raw.assumingMemoryBound(to: Float.self)
-            let outFrames = Int(buf.mDataByteSize) / (MemoryLayout<Float>.size * nch)
+            let n = min(frames, Int(buf.mDataByteSize) / (MemoryLayout<Float>.size * nch))
+            guard n > 0 else { continue }
 
             for c in 0..<nch {
                 let oc = base + c
+                var g = g0
+                var i = 0
                 if totalOut == 1 {
-                    // Mono device: average all tap channels into it.
+                    // Mono device: average all tap channels.
                     let w = 1 / Float(tapChannels)
-                    for tc in 0..<tapChannels {
-                        mix(inList, firstTapBuffer, tc, into: out + c, outStride: nch, outFrames: outFrames,
-                            g0: g0 * w, g1: g1 * w)
+                    while i < n {
+                        var sum: Float = 0
+                        for tc in 0..<tapChannels { sum += scratch[tc * capacity + i] }
+                        out[i * nch + c] = clamp(sum * w * g)
+                        g += step
+                        i += 1
                     }
                 } else if oc < tapChannels {
-                    mix(inList, firstTapBuffer, oc, into: out + c, outStride: nch, outFrames: outFrames,
-                        g0: g0, g1: g1)
-                }
-                // Clamp so boosted (>100%) audio clips cleanly instead of wrapping in the driver.
-                var i = 0
-                while i < outFrames {
-                    let p = out + (i * nch + c)
-                    if p.pointee > 1 { p.pointee = 1 } else if p.pointee < -1 { p.pointee = -1 }
-                    i += 1
+                    let src = scratch + oc * capacity
+                    while i < n {
+                        out[i * nch + c] = clamp(src[i] * g)
+                        g += step
+                        i += 1
+                    }
                 }
             }
         }
     }
 
-    /// Adds tap channel `channel` × a linear gain ramp (g0 → g1, avoids zipper noise) into `dst`.
     @inline(__always)
-    private func mix(_ list: UnsafeMutableAudioBufferListPointer, _ firstBuffer: Int, _ channel: Int,
-                     into dst: UnsafeMutablePointer<Float>, outStride: Int, outFrames: Int,
-                     g0: Float, g1: Float) {
+    private func clamp(_ x: Float) -> Float { x > 1 ? 1 : (x < -1 ? -1 : x) }
+
+    /// Pointer, stride and frame count of tap channel `channel` within the input buffer list.
+    @inline(__always)
+    private func channel(_ list: UnsafeMutableAudioBufferListPointer, _ firstBuffer: Int, _ channel: Int)
+        -> (UnsafeMutablePointer<Float>, Int, Int)? {
         var idx = channel
         var b = firstBuffer
         while b < list.count {
             let buf = list[b]
             let n = Int(buf.mNumberChannels)
             if idx < n {
-                guard let data = buf.mData else { return }
-                let src = data.assumingMemoryBound(to: Float.self) + idx
-                let frames = min(outFrames, Int(buf.mDataByteSize) / (MemoryLayout<Float>.size * n))
-                guard frames > 0 else { return }
-                let step = (g1 - g0) / Float(frames)
-                var g = g0
-                var i = 0
-                while i < frames {
-                    dst[i * outStride] += src[i * n] * g
-                    g += step
-                    i += 1
-                }
-                return
+                guard let data = buf.mData, n > 0 else { return nil }
+                let frames = Int(buf.mDataByteSize) / (MemoryLayout<Float>.size * n)
+                return (data.assumingMemoryBound(to: Float.self) + idx, n, frames)
             }
             idx -= n
             b += 1
         }
+        return nil
     }
 }

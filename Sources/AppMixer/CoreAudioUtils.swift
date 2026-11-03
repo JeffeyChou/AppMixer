@@ -31,13 +31,30 @@ enum CA {
         AudioObjectPropertyAddress(mSelector: selector, mScope: scope, mElement: kAudioObjectPropertyElementMain)
     }
 
-    static func get<T: BitwiseCopyable>(_ object: AudioObjectID, _ selector: AudioObjectPropertySelector, initial: T) throws -> T {
-        var addr = address(selector)
+    static func get<T: BitwiseCopyable>(_ object: AudioObjectID, _ selector: AudioObjectPropertySelector,
+                                        scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal,
+                                        initial: T) throws -> T {
+        var addr = address(selector, scope: scope)
         var value = initial
         var size = UInt32(MemoryLayout<T>.size)
         try check(AudioObjectGetPropertyData(object, &addr, 0, nil, &size, &value),
                   "read \(fourCC(OSStatus(bitPattern: selector)))")
         return value
+    }
+
+    static func set<T: BitwiseCopyable>(_ object: AudioObjectID, _ selector: AudioObjectPropertySelector,
+                                        scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal,
+                                        value: T) throws {
+        var addr = address(selector, scope: scope)
+        var v = value
+        try check(AudioObjectSetPropertyData(object, &addr, 0, nil, UInt32(MemoryLayout<T>.size), &v),
+                  "write \(fourCC(OSStatus(bitPattern: selector)))")
+    }
+
+    static func has(_ object: AudioObjectID, _ selector: AudioObjectPropertySelector,
+                    scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal) -> Bool {
+        var addr = address(selector, scope: scope)
+        return AudioObjectHasProperty(object, &addr)
     }
 
     static func getObjectIDs(_ object: AudioObjectID, _ selector: AudioObjectPropertySelector) throws -> [AudioObjectID] {

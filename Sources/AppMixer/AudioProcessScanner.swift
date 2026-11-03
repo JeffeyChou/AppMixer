@@ -18,6 +18,7 @@ struct AudioApp: Identifiable, Equatable {
     var objectIDs: [AudioObjectID]
     var isPlaying: Bool
     let isApp: Bool         // owned by a real .app bundle (has a proper icon), not a bare daemon
+    var outputDevices: [AudioDeviceID] = []   // devices the app's processes are playing to right now
 }
 
 enum AudioProcessScanner {
@@ -89,9 +90,13 @@ enum AudioProcessScanner {
 }
 
 /// Incremental version of scan()+group() used by the app. A process object's pid, bundle ID and owning
-/// app never change, so they are resolved once and cached. With a `listenQueue`, each object's
-/// `IsRunningOutput` is pushed to us by a Core Audio listener instead of being read on every scan, so a
-/// warm scan is a single property read. Not thread-safe: use it only on `listenQueue`.
+/// app never change, so they are resolved once and cached. With a `listenQueue`, each object's playing
+/// state and output devices are refreshed from Core Audio notifications instead of being read on every
+/// scan, so a warm scan is a single property read. Not thread-safe: use it only on `listenQueue`.
+///
+/// Note: Core Audio does not notify `IsRunningOutput` changes for other processes' objects, but it does
+/// notify `IsRunning` and `Devices`; we listen to those and re-read `IsRunningOutput` (verified with
+/// a test player that starts and stops output).
 final class AudioProcessCatalog {
     private struct Owner {
         let key: String
@@ -100,17 +105,25 @@ final class AudioProcessCatalog {
         let isApp: Bool
     }
 
-    /// Called on `listenQueue` when some process starts or stops playing.
-    var onPlayingChange: (() -> Void)?
+    private struct LiveState: Equatable {
+        var playing: Bool
+        var devices: [AudioDeviceID]
+    }
+
+    /// Called on `listenQueue` when a process starts/stops playing or changes output device.
+    var onChange: (() -> Void)?
 
     /// nil owner = excluded (AppMixer itself).
     private var owners: [AudioObjectID: Owner?] = [:]
-    private var playing: [AudioObjectID: Bool] = [:]
+    private var live: [AudioObjectID: LiveState] = [:]
     private var listeners: [AudioObjectID: AudioObjectPropertyListenerBlock] = [:]
     private let listenQueue: DispatchQueue?
     private let excludedPID: pid_t
     private let excludedBundleID: String?
-    private static var runningAddress = CA.address(kAudioProcessPropertyIsRunningOutput)
+    private static let watchedAddresses = [
+        CA.address(kAudioProcessPropertyIsRunning),
+        CA.address(kAudioProcessPropertyDevices, scope: kAudioObjectPropertyScopeOutput),
+    ]
 
     init(listenQueue: DispatchQueue? = nil,
          excludingPID pid: pid_t = getpid(), bundleID: String? = Bundle.main.bundleIdentifier) {
@@ -120,49 +133,66 @@ final class AudioProcessCatalog {
     }
 
     deinit {
-        for (id, block) in listeners {
-            AudioObjectRemovePropertyListenerBlock(id, &Self.runningAddress, listenQueue, block)
+        for (id, block) in listeners { removeListeners(id, block) }
+    }
+
+    private static func read(_ id: AudioObjectID) -> LiveState {
+        let playing = ((try? CA.get(id, kAudioProcessPropertyIsRunningOutput, initial: UInt32(0))) ?? 0) != 0
+        var addr = CA.address(kAudioProcessPropertyDevices, scope: kAudioObjectPropertyScopeOutput)
+        var size: UInt32 = 0
+        var devices: [AudioDeviceID] = []
+        if AudioObjectGetPropertyDataSize(id, &addr, 0, nil, &size) == noErr, size > 0 {
+            devices = [AudioDeviceID](repeating: 0, count: Int(size) / MemoryLayout<AudioDeviceID>.size)
+            if AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &devices) != noErr { devices = [] }
         }
+        return LiveState(playing: playing, devices: devices.sorted())
     }
 
-    private static func readPlaying(_ id: AudioObjectID) -> Bool {
-        ((try? CA.get(id, kAudioProcessPropertyIsRunningOutput, initial: UInt32(0))) ?? 0) != 0
-    }
-
-    /// Cached when a listener keeps it current; otherwise read now.
-    private func isPlaying(_ id: AudioObjectID) -> Bool {
-        if listeners[id] != nil, let cached = playing[id] { return cached }
-        return Self.readPlaying(id)
+    /// Cached when listeners keep it current; otherwise read now.
+    private func state(_ id: AudioObjectID) -> LiveState {
+        if listeners[id] != nil, let cached = live[id] { return cached }
+        return Self.read(id)
     }
 
     private func startListening(_ id: AudioObjectID) {
         guard let listenQueue else { return }
-        playing[id] = Self.readPlaying(id)
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             guard let self, self.listeners[id] != nil else { return }
-            let now = Self.readPlaying(id)
-            if self.playing[id] != now {
-                self.playing[id] = now
-                self.onPlayingChange?()
+            let now = Self.read(id)
+            if self.live[id] != now {
+                self.live[id] = now
+                self.onChange?()
             }
         }
-        if AudioObjectAddPropertyListenerBlock(id, &Self.runningAddress, listenQueue, block) == noErr {
+        var ok = true
+        for var addr in Self.watchedAddresses {
+            ok = ok && AudioObjectAddPropertyListenerBlock(id, &addr, listenQueue, block) == noErr
+        }
+        if ok {
             listeners[id] = block
+        } else {
+            removeListeners(id, block)
+        }
+        // Read after subscribing so a change in between can't be missed (callbacks run on this queue).
+        live[id] = Self.read(id)
+    }
+
+    private func removeListeners(_ id: AudioObjectID, _ block: @escaping AudioObjectPropertyListenerBlock) {
+        for var addr in Self.watchedAddresses {
+            AudioObjectRemovePropertyListenerBlock(id, &addr, listenQueue, block)
         }
     }
 
     private func forget(_ id: AudioObjectID) {
-        if let block = listeners.removeValue(forKey: id) {
-            AudioObjectRemovePropertyListenerBlock(id, &Self.runningAddress, listenQueue, block)
-        }
-        playing[id] = nil
+        if let block = listeners.removeValue(forKey: id) { removeListeners(id, block) }
+        live[id] = nil
         owners[id] = nil
     }
 
     func scan() -> [AudioApp] {
         guard let ids = try? CA.getObjectIDs(CA.systemObject, kAudioHardwarePropertyProcessObjectList) else { return [] }
-        let live = Set(ids)
-        for id in Array(owners.keys) where !live.contains(id) { forget(id) }
+        let present = Set(ids)
+        for id in Array(owners.keys) where !present.contains(id) { forget(id) }
 
         var runningApps: [NSRunningApplication]?   // only fetched when a new process shows up
         var byKey: [String: AudioApp] = [:]
@@ -187,20 +217,23 @@ final class AudioProcessCatalog {
             }
             guard let owner else { continue }
 
-            let playing = isPlaying(id)
+            let st = state(id)
             if var app = byKey[owner.key] {
                 app.objectIDs.append(id)
-                app.isPlaying = app.isPlaying || playing
+                app.isPlaying = app.isPlaying || st.playing
+                app.outputDevices += st.devices
                 byKey[owner.key] = app
             } else {
                 byKey[owner.key] = AudioApp(id: owner.key, name: owner.name, pid: owner.pid,
-                                            objectIDs: [id], isPlaying: playing, isApp: owner.isApp)
+                                            objectIDs: [id], isPlaying: st.playing, isApp: owner.isApp,
+                                            outputDevices: st.devices)
                 order.append(owner.key)
             }
         }
         return order.compactMap { key in
             guard var app = byKey[key] else { return nil }
             app.objectIDs.sort()
+            app.outputDevices = Array(Set(app.outputDevices)).sorted()
             return app
         }
     }
