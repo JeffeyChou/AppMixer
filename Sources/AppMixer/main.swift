@@ -175,6 +175,11 @@ if let i = CommandLine.arguments.firstIndex(of: "--watch") {
     exit(0)
 }
 
+if let i = CommandLine.arguments.firstIndex(of: "--record-demo"), i + 1 < CommandLine.arguments.count {
+    PreviewRecorder.record(to: CommandLine.arguments[i + 1])
+    exit(0)
+}
+
 if CommandLine.arguments.contains("--selftest") {
     exit(SelfTest.run() ? 0 : 1)
 }

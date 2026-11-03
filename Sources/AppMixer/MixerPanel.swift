@@ -85,7 +85,7 @@ struct MixerPanel: View {
     }
 
     private func eqEditor(_ app: AudioApp) -> some View {
-        EQEditor(id: app.id, gains: model.eq(app.id), isOn: model.isEQOn(app.id), model: model)
+        EQEditor(id: app.id, gains: model.eq(app.id), isOn: model.isEQOn(app.id), tick: model.previewTick, model: model)
             .equatable()
     }
 
@@ -357,10 +357,11 @@ private struct EQEditor: View, Equatable {
     let id: String
     let gains: [Double]
     let isOn: Bool
+    let tick: Int
     let model: MixerModel
 
     static func == (a: EQEditor, b: EQEditor) -> Bool {
-        a.id == b.id && a.gains == b.gains && a.isOn == b.isOn
+        a.id == b.id && a.gains == b.gains && a.isOn == b.isOn && a.tick == b.tick
     }
 
     var body: some View {
@@ -385,7 +386,7 @@ private struct EQEditor: View, Equatable {
                     .font(.caption)
             }
             ZStack {
-                SpectrumView(id: id, model: model).equatable()
+                SpectrumView(id: id, tick: tick, model: model).equatable()
                 EQGraph(gains: gains, isOn: isOn) { band, gain in
                     model.setEQBand(band, gain: gain, for: id)
                 }
@@ -426,9 +427,10 @@ private enum EQPlot {
 /// Only this Canvas redraws (~30 fps); the analysis runs only while an EQ editor is open.
 private struct SpectrumView: View, Equatable {
     let id: String
+    let tick: Int           // only changes when recording a preview (no display link offscreen)
     let model: MixerModel
 
-    static func == (a: SpectrumView, b: SpectrumView) -> Bool { a.id == b.id }
+    static func == (a: SpectrumView, b: SpectrumView) -> Bool { a.id == b.id && a.tick == b.tick }
 
     var body: some View {
         let analyzer = model.spectrumAnalyzer(for: id)

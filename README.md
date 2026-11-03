@@ -1,99 +1,122 @@
 # AppMixer
 
-macOS 菜单栏小工具：按 App 调节音量、EQ 和输出设备，并管理系统输出。
+**Per-app volume, EQ and output device for macOS, from the menu bar.**
+Lightweight, native, no audio driver to install.
 
-- **按 App 调音量**：0–150%，可以单独静音
-- **按 App 的 10 段 EQ**：32 Hz–16 kHz，±12 dB，带预设；在面板里拖动频响曲线即可调整。曲线背后会实时显示这个 App 经过 EQ 后的频谱，不知道乐器在哪个频率，也可以直接对着频谱峰值调
-- **按 App 指定输出设备**：比如让 Zoom 走耳机，让音乐继续走音箱
-- **系统输出**：切换输出设备、调系统音量和静音
-- **Share Audio**：系统输出同时播放到多个设备，比如两副蓝牙耳机；系统音量滑块会同时调节所有设备
-- 基于 Core Audio **process tap**（macOS 14.2+ 公开 API），不需要安装驱动。只有调过音量、开了 EQ 或指定了输出设备的 App 才会被接管，其余 App 不做任何处理
-- 设置按 App 保存，App 重启后自动生效
-- 不需要付费开发者账号，用 Command Line Tools 就能编译
+[简体中文](README.zh-CN.md)
 
-## 构建与安装
+<p align="center">
+  <img src="docs/demo.gif" width="360" alt="AppMixer: per-app volume, a 10-band EQ over the app's live spectrum, and per-app output devices">
+</p>
 
-需要 macOS 14.2+ 和 Command Line Tools（`xcode-select --install`），不需要 Xcode。
+## Features
 
-```bash
-./build.sh            # 生成 build/AppMixer.app（ad-hoc 签名）
-./build.sh install    # 复制到 ~/Applications 并启动
-./build.sh run        # 直接从 build/ 启动
-```
+- **Per-app volume**: 0–150 % for every app that plays audio, plus mute.
+- **Per-app 10-band EQ** (32 Hz–16 kHz, ±12 dB) with presets. Drag the curve directly. The app's **live spectrum** is drawn behind it, so you can see where the bass or the voice sits and how your change affects it.
+- **Per-app output device**: for example, Zoom on your headphones while music stays on the speakers.
+- **System output**: switch the output device, change system volume, mute.
+- **Share Audio**: play the system output on several devices at once (two pairs of headphones, speakers + headphones). The volume slider controls all of them.
+- **One click**: mute all playing apps, reset everything, quit. Right-click the menu bar icon for the same actions.
+- Settings are remembered per app and applied again when the app restarts.
 
-启动后菜单栏会出现一个滑块图标：
+## Why it's lightweight
 
-- **左键**：打开面板。
-  - 顶部按钮：全部静音（再点一次取消）、全部重置（音量、EQ、输出设备）、退出（⌘Q）。
-  - Output 卡片：点设备名可以切换系统输出；点 Share 可以勾选要同时播放的设备；下面是系统音量。
-  - 每个 App 一行：静音、音量滑块、输出设备（指定后名字旁会显示「↪ 设备名」）、EQ（在这一行下方展开曲线编辑器）、重置。
-- **右键**（或按住 ⌃ 点击）：弹出菜单，包含 Mute All / Reset All / Quit。
-- 面板里先列出正在播放的 App。勾选「Show idle audio clients」后，在 IDLE 分组里还会显示其它音频客户端：真正的 .app 排前面，后台进程排后面，组内按名称排序。整个面板最高约为半个屏幕，超出部分可以滚动。
+- Built on Core Audio **process taps** (public API, macOS 14.2+). There is no virtual audio driver and nothing to install.
+- **Apps you haven't touched are not processed at all.** AppMixer only takes over an app when its volume isn't 100 %, its EQ is on, or it plays on another device.
+- The audio path does no allocation and no locking. EQ, volume and spectrum together cost about **0.3 % of one CPU core per processed app**.
+- The UI is event-driven. It does no polling while the panel is closed, keeps work off the main thread, and redraws only what changed.
 
-菜单栏图标可以不重新编译直接调整，改完重启 AppMixer 生效：
+## Requirements
 
-```bash
-defaults write dev.appmixer.AppMixer iconPointSize -float 17   # 图标大小（pt）
-defaults write dev.appmixer.AppMixer iconOffsetY -float -0.5   # 垂直偏移（pt）：正数往下，负数往上
-defaults write dev.appmixer.AppMixer iconWeight semibold       # 粗细：regular / medium / semibold / bold / heavy
-defaults delete dev.appmixer.AppMixer iconOffsetY              # 删除某一项，恢复默认值
-```
+- macOS 14.2 or later. Developed and tested on macOS 26 on Apple Silicon.
+- To build: the Xcode Command Line Tools (`xcode-select --install`). Full Xcode is not needed.
 
-调试工具（都不会改变任何音量，也不会请求权限）：
+## Install
 
 ```bash
-build/AppMixer.app/Contents/MacOS/AppMixer --list                    # 打印 Core Audio 识别到的音频进程和分组结果
-build/AppMixer.app/Contents/MacOS/AppMixer --snapshot out.png [--idle]  # 把面板渲染成 PNG（可用于 README 截图或检查布局）
-build/AppMixer.app/Contents/MacOS/AppMixer --icon-preview      # 在菜单栏临时显示图标 3 秒（用于调整图标位置）
-build/AppMixer.app/Contents/MacOS/AppMixer --measure-open      # 自动开关面板 6 次，测量打开时主线程的卡顿
-build/AppMixer.app/Contents/MacOS/AppMixer --selftest          # 用合成正弦波测试渲染路径（增益、EQ 频响、单声道下混）并测 CPU 开销
-build/AppMixer.app/Contents/MacOS/AppMixer --snapshot out.png --demo  # 截图时在内存里演示 EQ 和输出设备（不保存）
+git clone <this repository>
+cd AppMixer
+./build.sh install      # builds, copies to ~/Applications and launches it
 ```
 
-## 首次使用：系统音频录制权限
+A slider icon appears in the menu bar. `./build.sh` only builds `build/AppMixer.app`, and `./build.sh run` launches it from there.
 
-第一次把某个 App 的音量调离 100% 时，系统会请求「系统音频录制」权限，点允许即可。
-如果点了拒绝，可以到 系统设置 → 隐私与安全性 → 录屏与系统录音 →「仅系统录音」里打开 AppMixer。
+The first time an app needs processing, macOS asks for **System Audio Recording** permission. AppMixer needs it to read an app's audio so it can change it. Audio is processed locally and is never recorded or sent anywhere. If you denied the prompt, enable AppMixer in *System Settings → Privacy & Security → Screen & System Audio Recording → System Audio Recording Only*.
 
-ad-hoc 签名每次重新编译后签名都会变，系统可能会再次要求授权。想避免这个问题，可以在「钥匙串访问 → 证书助理 → 创建证书」里建一个类型为「代码签名」的自签名证书（比如叫 `AppMixer Dev`），然后这样编译：
+> **Signing.** The build is ad-hoc signed, so rebuilding asks for the permission again. To keep it across builds, create a self-signed code-signing certificate in *Keychain Access → Certificate Assistant → Create a Certificate* (for example "AppMixer Dev") and build with `SIGN_ID="AppMixer Dev" ./build.sh install`.
+>
+> There is no notarized download yet. If you share a build you made yourself, the recipient has to allow it in *Privacy & Security* (or run `xattr -dr com.apple.quarantine AppMixer.app`).
+
+## Usage
+
+| Where | What |
+|---|---|
+| Menu bar icon, left click | Opens the mixer. |
+| Menu bar icon, right click | Mute all playing apps, reset all, quit. |
+| Header | Mute all (click again to unmute), reset all apps (volume, EQ, output), quit (⌘Q). |
+| Output card | Click the device name to change the system output. **Share** adds devices that play the system output too. The slider is the system volume. |
+| App row | Mute, volume, **output device** (an app routed elsewhere shows "↪ device" next to its name), **EQ** (opens the curve editor with the live spectrum below the row), reset. |
+| "Show idle audio clients" | Also lists apps that use audio but are silent right now. Real apps are listed first, background processes after. |
+
+The menu bar icon can be tuned without rebuilding (restart AppMixer afterwards):
 
 ```bash
-SIGN_ID="AppMixer Dev" ./build.sh install
+defaults write dev.appmixer.AppMixer iconPointSize -float 17
+defaults write dev.appmixer.AppMixer iconOffsetY -float -0.5   # points; positive = down
+defaults write dev.appmixer.AppMixer iconWeight semibold       # regular | medium | semibold | bold | heavy
 ```
 
-## 工作原理
+## How it works
 
 ```
-App 的音频 ──▶ process tap（读取期间，原声在硬件层被静音）
+app audio ──▶ process tap (the app is muted at the hardware while AppMixer reads it)
                   │
                   ▼
-     私有 aggregate device [ tap 作为输入 + 当前输出设备作为输出 ]
-                  │  IOProc：out = clamp(in × gain)，带增益平滑
+   private aggregate device [ tap as input + output device(s) ]
+                  │  IOProc: EQ (10 biquads) → spectrum ring → volume → limiter
                   ▼
-             扬声器 / 耳机
+   system output · a chosen device · several devices (stacked aggregate)
 ```
 
-- 识别 App：`kAudioHardwarePropertyProcessObjectList`，再读每个进程的 `IsRunningOutput`。浏览器等 App 的声音来自 helper / XPC 进程，用 responsible pid 和 bundle ID 前缀把这些进程归到所属 App 下。
-- tap 和 aggregate device 都是本进程私有的。AppMixer 退出或崩溃时会自动销毁，被调节的 App 会恢复原音量。
-- 同一个 tap 依次做 EQ（10 个 biquad，系数通过非阻塞的 trylock 交给音频线程）、增益和限幅，再输出到目标设备。如果目标是多个设备（Share Audio），就用 stacked aggregate 同时输出到所有设备。一个 App 开着 EQ 时，渲染只占单核约 0.3%。
-- 频谱：音频线程在 EQ 之后、音量之前，把信号写入一个无锁环形缓冲区。EQ 编辑器打开时，界面以约 30 帧/秒做 8192 点 FFT（vDSP），按 1/6 倍频程聚合；单帧约 15 µs，只重绘频谱这一个 Canvas。为了拿到音频，打开 EQ 编辑器时会临时接管这个 App，关闭 3 秒后自动撤掉。
-- Share Audio 会创建一个公开的多输出设备「AppMixer Shared Output」并设为系统输出。停止共享或退出 AppMixer 时会删除它并恢复原设备；如果 AppMixer 崩溃，下次启动时会自动接管或清理它。
-- 切换默认输出设备时，会自动在新设备上重建 tap。
-- 主线程上不做耗时操作：进程扫描在后台队列完成（pid 和所属 App 只解析一次，播放状态由 Core Audio 监听推送，热扫描约 0.03 ms）。tap 的创建和销毁放在独立的引擎队列里，滑块的连续变化会被合并。音量回到 100% 后，tap 会保留 3 秒再撤掉。拖动滑块时只重绘那一行。
+- **App detection**: AppMixer reads Core Audio's process list. Browsers and others play audio from helper or XPC processes; those are grouped under the app that owns them. Core Audio doesn't send notifications when another process starts or stops output, but it does notify `IsRunning` and `Devices`, so AppMixer listens to those.
+- **Following the system output**: some apps (Zoom during a call, for example) keep playing on the old device when the system output changes. AppMixer notices this and moves them to the new output. Apps that deliberately play on another device are left alone.
+- **Bluetooth headphones**: coreaudiod makes AirPods and similar headphones the default output as soon as any audio plays on them. While an app is routed there, AppMixer undoes that automatic switch, so the rest of the system stays where it was.
+- **Share Audio** creates a public multi-output device, *AppMixer Shared Output*, and makes it the system output. It is removed when you stop sharing or quit. After a crash, it is adopted or cleaned up on the next launch.
+- Everything AppMixer creates for processing is private to its process. If AppMixer quits or crashes, every app plays normally again.
 
-## 已知限制
+## Limitations
 
-- 被接管的 App 会多出几毫秒到十几毫秒的输出延迟。
-- 只会输出到系统默认输出设备。如果某个 App 自己选择了别的输出设备，暂不支持。
-- 在 100% 和非 100% 之间切换时，会因为创建或销毁 tap 出现一次轻微的爆音或断音。
-- 用到两个私有符号：`TCCAccessPreflight/Request`（检查权限）和 `responsibility_get_pid_responsible_for_pid`（把进程归到所属 App）。两者都通过 `dlsym` 动态查找，找不到时会自动降级。所以这个工具不能上架 Mac App Store，但可以通过 GitHub 或 Homebrew 分发。
+- An app that AppMixer processes gets a few milliseconds of extra output latency.
+- Switching an app between processed and untouched (for example, leaving 100 %) can cause one short glitch.
+- macOS can't change the volume of HDMI/DisplayPort displays, so the system volume slider is disabled for them.
+- AppMixer calls two private functions through `dlsym`, and falls back gracefully if either is missing:
+  - `TCCAccessPreflight/Request`, to check the permission before muting anything;
+  - `responsibility_get_pid_responsible_for_pid`, to group helper processes under their app.
 
-## 分发
+  Because of these, AppMixer can't be distributed through the Mac App Store.
 
-没有 Developer ID 时，别人下载的 zip 会被 Gatekeeper 拦截，需要到 系统设置 → 隐私与安全性 点「仍要打开」，或者执行：
+## Development
+
+AppMixer is a Swift package with no Xcode project. All diagnostic flags are side-effect free: they don't change volumes or settings.
 
 ```bash
-xattr -dr com.apple.quarantine /Applications/AppMixer.app
+APP=build/AppMixer.app/Contents/MacOS/AppMixer
+$APP --selftest            # DSP checks: gain, EQ vs. analytic response, spectrum calibration, timing
+$APP --list                # audio processes, grouping, output devices, per-app routing
+$APP --watch 15            # live playing-state detection vs. direct reads
+$APP --snapshot out.png [--idle] [--demo]   # render the panel to PNG
+$APP --measure-open        # main-thread stalls while opening the panel
+$APP --icon-preview        # show the menu bar icon for 3 s
+./scripts/make-demo-gif.sh # regenerate docs/demo.gif from the real UI with demo data (needs ffmpeg)
 ```
 
-从源码编译（`./build.sh install`）则不会遇到这个问题。
+| File | What it contains |
+|---|---|
+| `ProcessTap.swift` | Tap, private aggregate device, real-time render path |
+| `TapEngine.swift` | Creates and removes taps off the main thread |
+| `Equalizer.swift` | Biquad design and EQ processor |
+| `Spectrum.swift` | Lock-free ring and FFT analyser |
+| `AudioProcessScanner.swift` | App detection and grouping |
+| `OutputDevices.swift` | Devices, system volume, Share Audio |
+| `MixerModel.swift` | State and routing rules |
+| `MixerPanel.swift` | UI |

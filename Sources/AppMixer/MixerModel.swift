@@ -183,6 +183,32 @@ final class MixerModel: ObservableObject {
         return d
     }
 
+    // MARK: - Preview data (README GIF / screenshots; UI-only models only)
+
+    /// Bumped once per recorded frame so the spectrum redraws even without a display link.
+    @Published private(set) var previewTick = 0
+
+    func loadPreview(apps: [AudioApp], icons: [String: NSImage], devices: [OutputDevice],
+                     systemUID: String, systemVolume: Float) {
+        guard !engineEnabled else { return }
+        self.apps = apps
+        self.icons = icons
+        self.devices = devices
+        systemDeviceUID = systemUID
+        self.systemVolume = systemVolume
+        systemMuted = false
+        shareUIDs = []
+        outputError = nil
+        permission = .authorized
+    }
+
+    func setPreviewSystemVolume(_ value: Float) {
+        guard !engineEnabled else { return }
+        systemVolume = value
+    }
+
+    func advancePreviewTick() { previewTick &+= 1 }
+
     // MARK: - Spectrum
 
     /// Post-EQ audio of an app's tap, if it is currently tapped.
